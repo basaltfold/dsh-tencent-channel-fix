@@ -1,6 +1,6 @@
 {
   "name": "dsh-tencent-channel-fix",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Repairs the buddy / workbuddy channel 400 (code 11128, \"Illegal API invocation from an unapproved channel\") inside dsh-our-free-model, and re-applies the fix after every upgrade · 修复 DSH 调用 buddy / workbuddy 渠道恒 400 code=11128 的问题，并在插件升级后自动重打",
   "type": "module",
   "main": "lib/index.js",
@@ -59,8 +59,8 @@
     }
   },
   "scripts": {
-    "test": "node --test test/",
-    "check": "node --check lib/index.js && node --check lib/patcher.js && node --test test/"
+    "test": "node --test",
+    "check": "node --check lib/index.js && node --check lib/patcher.js && node --test"
   },
   "engines": {
     "node": ">=20"
