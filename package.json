@@ -1,0 +1,69 @@
+{
+  "name": "dsh-tencent-channel-fix",
+  "version": "1.0.0",
+  "description": "Repairs the buddy / workbuddy channel 400 (code 11128, \"Illegal API invocation from an unapproved channel\") inside dsh-our-free-model, and re-applies the fix after every upgrade · 修复 DSH 调用 buddy / workbuddy 渠道恒 400 code=11128 的问题，并在插件升级后自动重打",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./patcher": "./lib/patcher.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-plugins",
+    "deepseek-harness",
+    "buddy",
+    "workbuddy",
+    "codebuddy",
+    "tencent",
+    "11128",
+    "dsh-our-free-model",
+    "channel-fix"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/basaltfold/dsh-tencent-channel-fix.git"
+  },
+  "homepage": "https://github.com/basaltfold/dsh-tencent-channel-fix#readme",
+  "bugs": {
+    "url": "https://github.com/basaltfold/dsh-tencent-channel-fix/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-rc.2": "compatible"
+      }
+    },
+    "install": {
+      "preferred": "tarball",
+      "tarball": "https://github.com/basaltfold/dsh-tencent-channel-fix/archive/refs/heads/master.tar.gz",
+      "zip": "https://github.com/basaltfold/dsh-tencent-channel-fix/archive/refs/heads/master.zip",
+      "git": "https://github.com/basaltfold/dsh-tencent-channel-fix.git"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "check": "node --check lib/index.js && node --check lib/patcher.js && node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
