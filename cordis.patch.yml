@@ -1,0 +1,24 @@
+# dsh-tencent-channel-fix bundle patch
+#
+# Mounts the repair plugin into every profile that lists this bundle.
+#
+# The repair itself runs inside `apply`, before any model request, and rewrites
+# `dsh-our-free-model` in place. Nothing here needs to touch providers, routes,
+# credentials, or the model row — hence a single insert and no config overrides.
+#
+# The row `name` MUST equal the bare package name: the client-modules node half
+# resolves `require.resolve('<row-name>/package.json')` to locate the package.
+#
+# Optional entry config (all defaults shown):
+#
+#   config:
+#     autoApply: true      # false = report drift only, never write
+#     target: ''           # explicit dsh-our-free-model directory
+#     verbose: false       # log every step, including no-op boots
+#
+- insert:
+    - id: tencent-channel-fix
+      name: 'dsh-tencent-channel-fix'
+      config:
+        autoApply: true
+        verbose: false
