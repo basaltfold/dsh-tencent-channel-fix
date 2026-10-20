@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1 — 2026-10-21
+
+### Fixed
+
+- The `test` and `check` npm scripts passed a directory to `node --test`
+  (`node --test test/`), which Node 24 rejects with
+  `Error: Cannot find module .../test` (`MODULE_NOT_FOUND`). Both now use
+  auto-discovery (`node --test`), which is the form the suite was actually
+  verified with: 6 suites, 29 tests, all passing.
+
 ## 1.0.0 — 2026-10-21
 
 Initial release.
