@@ -5,6 +5,11 @@
  * reads or writes a real install. The fixtures reproduce the two upstream shapes
  * the patcher must survive: `kernel.js` with LF, `pack.js` with CRLF (which is
  * how both ship), plus the anchors each patch looks for.
+ *
+ * Revision 2 cases additionally cover the two shapes the real 2.5.8 bundle
+ * presents: a `pack.js` whose `apply()` registers an adapter against a transport
+ * instance it later closes, and a `pack.js` carrying revision 1's injected
+ * `rewriteTencentContentFingerprints` call that must be removed.
  */
 
 import assert from 'node:assert/strict';
@@ -46,49 +51,150 @@ export async function resolveAttributionUserAgent(logger) {
 }
 `;
 
-/** Minimal stand-in for `vendor/channel-pack/pack.js`, in the shape it ships. */
+/**
+ * Minimal stand-in for `vendor/channel-pack/pack.js`, in the shape it ships.
+ *
+ * Mirrors the real bundle: a signed transport, an `apply()` that registers the
+ * CodeArts adapter against that instance and then closes it on dispose, and the
+ * three consumers the repair has to rewire.
+ */
 function packStock() {
-  return `var TENCENT_PROVIDERS = ["buddy", "workbuddy"];
-var CONTENT_FINGERPRINTS = [
-  {
-    find: "Main branch (you will usually use this for PRs)",
-    replace: "Main branch (PRs usually go here)",
-    note: "stock"
-  }
-];
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^\${}()|[\\]\\\\]/g, "\\\\$&");
-}
-var COMPILED = CONTENT_FINGERPRINTS.map((rule) => ({
-  pattern: new RegExp(escapeRegExp(rule.find), "gi"),
-  replace: rule.replace
-}));
-function isTencentContentFingerprintProvider(provider) {
-  return TENCENT_PROVIDERS.includes(provider);
-}
-function rewriteTencentContentFingerprints(text, provider) {
-  if (!isTencentContentFingerprintProvider(provider)) return text;
-  let out = text;
-  for (const rule of COMPILED) out = out.replace(rule.pattern, rule.replace);
-  return out;
-}
-var BuddyAdapter = class {
-  async buildBody(options) {
-    const messages = serializeMessages2(options.messages, imageUrls);
-    if (options.system !== void 0 && options.system.length > 0) {
-      messages.unshift({ role: "system", content: options.system });
+  return `var directLane = { fetch: null };
+function createDirectFetch(options = {}) {
+  const agent = {};
+  const lifetime = new AbortController();
+  let closing;
+  return {
+    fetch: async (input, init) => {
+      lifetime.signal.throwIfAborted();
+      return "ok:" + input;
+    },
+    close() {
+      if (!closing) {
+        lifetime.abort(new DOMException("CodeArts \\u7B7E\\u540D\\u4F20\\u8F93\\u5DF2\\u505C\\u6B62", "AbortError"));
+        closing = Promise.resolve();
+      }
+      return closing;
     }
-    return messages;
+  };
+}
+var mounted = new Set();
+function attachDirectFetch(fetcher) {
+  const binding = { fetch: fetcher };
+  mounted.add(binding);
+  return () => {
+    mounted.delete(binding);
+  };
+}
+function createChannelFetch(options = {}) {
+  return { async fetch(i) { return "net:" + i; }, async close() {} };
+}
+var CodeArtsAuth = class {
+  constructor(ctx, options) {
+    this.options = options;
   }
 };
-var CodeArtsAdapter = class {
-  async buildBody(options) {
-    if (options.system !== void 0 && options.system.length > 0) {
-      messages.unshift({ role: "system", content: options.system });
+var AccountPool = class {};
+function registerCodeArtsLlm(ctx, options) {
+  return { fetchImpl: options.fetchImpl };
+}
+function registerChannelPackRpc(ctx, pool, service, options) {
+  return options.codeartsFetcher;
+}
+function suppressAutoSettingsPage(ctx) {}
+function registerProviderSettings(ctx) {}
+function configureDeadModelStore(ctx) {}
+function createTokenLedgerStore(ctx) {
+  return {};
+}
+function attachTokenLedgerStore(store) {
+  return () => {};
+}
+function mountOpenAiGateway(ctx, pool) {}
+function installLoopResume(ctx) {}
+function apply(ctx, config = {}) {
+  const network = createChannelFetch({ outlet: config.outlet });
+  const signedNetwork = createDirectFetch({ outlet: config.outlet });
+  const detachSignedNetwork = attachDirectFetch(signedNetwork.fetch);
+  ctx.effect(() => () => {
+    detachSignedNetwork();
+    void signedNetwork.close();
+  });
+  ctx.effect(() => () => {
+    void network.close();
+  });
+  suppressAutoSettingsPage(ctx);
+  registerProviderSettings(ctx);
+  const service = new CodeArtsAuth(ctx, { fetcher: signedNetwork.fetch });
+  const pool = new AccountPool(ctx);
+  configureDeadModelStore(ctx);
+  const tokenLedgerStore = createTokenLedgerStore(ctx);
+  const detachTokenLedger = attachTokenLedgerStore(tokenLedgerStore);
+  ctx.effect(() => () => {
+    try {
+      tokenLedgerStore.flush();
+    } finally {
+      detachTokenLedger();
     }
-  }
-};
+  }, "token-ledger-persistence");
+  const codearts = registerCodeArtsLlm(ctx, {
+    fetchImpl: signedNetwork.fetch,
+    credentialRef: "cref",
+    resolveCredential: async () => ({}),
+    refresh: async () => {},
+    fetchRemoteModels: () => {},
+    accountPool: pool
+  });
+  registerChannelPackRpc(ctx, pool, service, codearts, {}, {
+    ...config,
+    codeartsFetcher: signedNetwork.fetch
+  });
+  mountOpenAiGateway(ctx, pool);
+  installLoopResume(ctx);
+  ctx.provide("accountPool", pool);
+}
 `;
+}
+
+/**
+ * A `pack.js` that additionally carries revision 1's injected direct-path
+ * rewrite — the block revision 2 must remove.
+ */
+function packWithLegacyInject() {
+  return packStock().replace(
+    '  suppressAutoSettingsPage(ctx);',
+    `  const messages = serializeMessages2(options.messages, imageUrls);
+  if (options.system !== void 0 && options.system.length > 0) {
+    messages.unshift({ role: "system", content: options.system });
+  }
+    // [dsh-tencent-channel-fix] The gateway path rewrites channel fingerprints
+    // in \`convertMessage\` / \`toMessages\`, but this direct adapter path never did,
+    // so the stock system prompt went out verbatim and the channel gate answered
+    // 400 / code 11128. Rewrite it here too. The rewriter is provider-scoped
+    // (\`TENCENT_PROVIDERS\`), so every non-Tencent channel passes through as-is.
+    for (let i = 0; i < messages.length; i++) {
+      const systemMessage = messages[i];
+      if (systemMessage.role !== "system") continue;
+      const systemContent = systemMessage.content;
+      if (typeof systemContent === "string") {
+        messages[i] = {
+          ...systemMessage,
+          content: rewriteTencentContentFingerprints(systemContent, this.product.id)
+        };
+      } else if (Array.isArray(systemContent)) {
+        messages[i] = {
+          ...systemMessage,
+          content: systemContent.map((part) =>
+            typeof part?.text === "string"
+              ? { ...part, text: rewriteTencentContentFingerprints(part.text, this.product.id) }
+              : part
+          )
+        };
+      }
+      break;
+    }
+  suppressAutoSettingsPage(ctx);`,
+  );
 }
 
 /** Write a stock (unpatched) target into a fresh temp directory. */
@@ -122,6 +228,9 @@ function makeTarget(options = {}) {
   return root;
 }
 
+/** Read the pack body back out of a target. */
+const readPack = (target) => readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
+
 after(() => {
   for (const dir of created) rmSync(dir, { recursive: true, force: true });
 });
@@ -129,17 +238,20 @@ after(() => {
 describe('patch definitions', () => {
   it('exposes a positive revision', () => {
     assert.equal(typeof PATCH_REVISION, 'number');
-    assert.ok(PATCH_REVISION >= 1);
+    assert.ok(PATCH_REVISION >= 2, 'revision 2 carries the transport-lifetime repair');
   });
 
-  it('gives every patch a unique id, a file, and at least one marker', () => {
+  it('gives every patch a unique id, a file, and usable edits', () => {
     const ids = new Set();
     for (const patch of PATCHES) {
       assert.equal(ids.has(patch.id), false, `duplicate id ${patch.id}`);
       ids.add(patch.id);
       assert.ok(patch.file.length > 0);
-      assert.ok(Array.isArray(patch.markers) && patch.markers.length > 0);
       assert.ok(Array.isArray(patch.edits) && patch.edits.length > 0);
+      // A cleanup patch intentionally carries no marker; every other patch must.
+      if (patch.absentMeansDone !== true) {
+        assert.ok(Array.isArray(patch.markers) && patch.markers.length > 0, patch.id);
+      }
       for (const edit of patch.edits) {
         assert.ok(edit.find.length > 0, `${patch.id}: empty find`);
         assert.notEqual(edit.find, edit.replace, `${patch.id}: no-op edit`);
@@ -156,11 +268,20 @@ describe('patch definitions', () => {
 });
 
 describe('inspect', () => {
-  it('reports a stock target as pending on every patch', () => {
+  it('reports a stock target as pending on every patch that has work to do', () => {
     const target = makeTarget();
     const states = inspect(target);
     assert.equal(states.length, PATCHES.length);
-    for (const state of states) assert.equal(state.state, 'pending', `${state.id} should be pending`);
+    for (const state of states) {
+      // The cleanup patch has nothing to remove on a clean fixture, which is
+      // reported as patched ("already clean") rather than pending.
+      if (state.id === 'legacy-direct-rewrite') {
+        assert.equal(state.state, 'patched');
+        assert.equal(state.note, 'already clean');
+      } else {
+        assert.equal(state.state, 'pending', `${state.id} should be pending`);
+      }
+    }
   });
 
   it('reports a missing file as drifted instead of throwing', () => {
@@ -177,7 +298,7 @@ describe('inspect', () => {
     const states = inspect(target);
     const packPatches = states.filter((state) => state.file.includes('pack.js'));
     assert.equal(packPatches.length, 2);
-    for (const state of packPatches) assert.equal(state.state, 'drifted');
+    assert.equal(packPatches.find((s) => s.id === 'signed-transport-seam').state, 'drifted');
   });
 
   it('detects drift when an anchor disappears', () => {
@@ -194,14 +315,20 @@ describe('inspect', () => {
 
   it('detects drift when an anchor is ambiguous', () => {
     const pack = packStock().replace(
-      'var CONTENT_FINGERPRINTS = [',
-      'var CONTENT_FINGERPRINTS = [\nvar CONTENT_FINGERPRINTS = [',
+      'var directLane = { fetch: null };',
+      'var directLane = { fetch: null };\nvar directLane = { fetch: null };',
     );
     const state = inspect(makeTarget({ pack })).find(
-      (entry) => entry.id === 'content-fingerprints',
+      (entry) => entry.id === 'signed-transport-seam',
     );
     assert.equal(state.state, 'drifted');
     assert.match(state.detail, /ambiguous/);
+  });
+
+  it('reports the legacy injection as pending, not absent', () => {
+    const target = makeTarget({ pack: packWithLegacyInject() });
+    const state = inspect(target).find((entry) => entry.id === 'legacy-direct-rewrite');
+    assert.equal(state.state, 'pending');
   });
 
   it('reports patched once a marker is present', () => {
@@ -218,9 +345,106 @@ describe('applyPatches', () => {
 
     assert.deepEqual(report.errors, []);
     assert.deepEqual(report.drifted, []);
-    assert.equal(report.applied.length, PATCHES.length);
+    // The cleanup has nothing to remove on a clean fixture, so it is reported as
+    // already-patched rather than applied.
+    assert.equal(report.applied.length, PATCHES.length - 1);
     assert.equal(report.changed, true);
-    assert.equal(formatStatus(target).includes(`${PATCHES.length}/${PATCHES.length} patches in place.`), true);
+    assert.equal(
+      formatStatus(target).includes(`${PATCHES.length}/${PATCHES.length} patches in place.`),
+      true,
+    );
+  });
+
+  it('rewires every signed-transport consumer onto the process-wide lane', () => {
+    const target = makeTarget();
+    applyPatches(target, { stamp: 'seam' });
+    const source = readPack(target);
+
+    // The lane must hang off globalThis (survives OFM's module purge) with a
+    // symbol key, and be published by apply().
+    assert.equal(
+      source.includes('var signedLane = globalThis[Symbol.for("our-free-model.signed-lane")] ??= { fetch: void 0 };'),
+      true,
+    );
+    assert.equal(source.includes('signedLane.fetch = signedNetwork.fetch;'), true);
+
+    // All three consumers read the closure, never the transport instance.
+    assert.equal(source.includes('new CodeArtsAuth(ctx, { fetcher: signedFetch })'), true);
+    assert.equal(source.includes('fetchImpl: signedFetch,'), true);
+    assert.equal(source.includes('codeartsFetcher: signedFetch'), true);
+    assert.equal(source.includes('fetchImpl: signedNetwork.fetch,'), false);
+
+    // Dispose clears the lane only when it still owns it, so a successor that
+    // already published is not un-published.
+    assert.equal(source.includes('if (signedLane.fetch === signedNetwork.fetch) signedLane.fetch = void 0;'), true);
+  });
+
+  it('leaves a working transport: a retained adapter survives a fiber restart', async () => {
+    const target = makeTarget({ newline: '\n' });
+    applyPatches(target, { stamp: 'behaviour' });
+
+    // Exercise the patched `apply()` semantics directly: generation 1 registers
+    // an adapter against the lane, is disposed, then generation 2 publishes a
+    // new transport. The retained adapter must reach the successor.
+    const source = readPack(target);
+    const start = source.indexOf('var directLane = { fetch: null };');
+    const end = source.indexOf('function createChannelFetch', start);
+    const region = source.slice(start, end);
+    const stubbed = `${region}
+      export { createDirectFetch, attachDirectFetch };
+    `;
+    const file = join(target, 'region.mjs');
+    writeFileSync(file, stubbed, 'utf8');
+
+    const mod = await import(`file:///${file.replaceAll('\\', '/')}`);
+    const lane = globalThis[Symbol.for('our-free-model.signed-lane')];
+
+    const applyOnce = () => {
+      const signedNetwork = mod.createDirectFetch({});
+      const detach = mod.attachDirectFetch(signedNetwork.fetch);
+      lane.fetch = signedNetwork.fetch;
+      // The closure apply() hands to consumers after the repair.
+      const signedFetch = (input, init) => {
+        const live = lane.fetch;
+        if (live === void 0) throw new Error('CodeArts signed transport is not ready');
+        return live(input, init);
+      };
+      const dispose = () => {
+        detach();
+        if (lane.fetch === signedNetwork.fetch) lane.fetch = void 0;
+        void signedNetwork.close();
+      };
+      return { signedFetch, dispose };
+    };
+
+    const gen1 = applyOnce();
+    const retained = gen1.signedFetch; // registered with the kernel, outlives dispose
+    gen1.dispose(); // plugin fiber restart
+    const gen2 = applyOnce(); // successor publishes its own transport
+
+    assert.equal(await retained('req-1'), 'ok:req-1', 'retained adapter must reach the successor lane');
+
+    // After the final dispose with no successor, it fails loudly instead of
+    // silently hanging on a dead transport. The closure throws before it can
+    // return, so this is a synchronous throw, not a rejected promise.
+    gen2.dispose();
+    assert.throws(() => retained('req-2'), /transport is not ready/);
+
+    delete globalThis[Symbol.for('our-free-model.signed-lane')];
+  });
+
+  it('removes the revision 1 injection that referenced a gone function', () => {
+    const target = makeTarget({ pack: packWithLegacyInject() });
+    assert.equal(readPack(target).includes('rewriteTencentContentFingerprints('), true);
+
+    const report = applyPatches(target, { stamp: 'legacy' });
+    assert.deepEqual(report.errors, []);
+    assert.equal(report.applied.includes('legacy-direct-rewrite'), true);
+
+    const source = readPack(target);
+    assert.equal(source.includes('rewriteTencentContentFingerprints('), false);
+    // The stock statement it was injected after must remain, unbroken.
+    assert.equal(source.includes('messages.unshift({ role: "system", content: options.system });'), true);
   });
 
   it('rewrites the stock UA into a versioned harness-free UA', () => {
@@ -259,48 +483,23 @@ describe('applyPatches', () => {
     assert.equal(sanitize('curl/8.0'), 'dsh-our-free-model/8.0');
   });
 
-  it('adds the rejected fingerprints ahead of the stock rule', () => {
-    const target = makeTarget();
-    applyPatches(target, { stamp: 'fp' });
-    const source = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
-
-    const identity = source.indexOf('find: "powered by DeepSeek Harness"');
-    const url = source.indexOf('find: "github.com/deepseek-ai/deepseek-harness"');
-    const stock = source.indexOf('find: "Main branch (you will usually use this for PRs)"');
-    assert.equal(identity > 0, true);
-    assert.equal(url > identity, true);
-    assert.equal(stock > url, true, 'stock rule must stay last so the array stays valid');
-  });
-
-  it('rewrites only the direct path, leaving the other adapter alone', () => {
-    const target = makeTarget();
-    applyPatches(target, { stamp: 'direct' });
-    const source = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
-
-    // One rewrite loop, in BuddyAdapter's buildBody.
-    assert.equal(source.split('rewriteTencentContentFingerprints(systemContent').length - 1, 1);
-    // CodeArtsAdapter's unshift must be untouched: no loop inside its body.
-    const codeArts = source.slice(source.indexOf('var CodeArtsAdapter = class'));
-    assert.equal(codeArts.includes('rewriteTencentContentFingerprints(systemContent'), false);
-  });
-
   it('is idempotent', () => {
     const target = makeTarget();
     applyPatches(target, { stamp: 'first' });
-    const afterFirst = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
+    const afterFirst = readPack(target);
 
     const second = applyPatches(target, { stamp: 'second' });
     assert.deepEqual(second.applied, []);
     assert.deepEqual(second.errors, []);
     assert.equal(second.changed, false);
     assert.equal(second.alreadyPatched.length, PATCHES.length);
-    assert.equal(readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8'), afterFirst);
+    assert.equal(readPack(target), afterFirst);
   });
 
   it('preserves CRLF line endings', () => {
     const target = makeTarget({ newline: '\r\n' });
     applyPatches(target, { stamp: 'crlf' });
-    const source = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
+    const source = readPack(target);
 
     const crlf = (source.match(/\r\n/g) ?? []).length;
     const lone = (source.match(/(?<!\r)\n/g) ?? []).length;
@@ -311,7 +510,7 @@ describe('applyPatches', () => {
   it('preserves LF line endings', () => {
     const target = makeTarget({ newline: '\n' });
     applyPatches(target, { stamp: 'lf' });
-    const source = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
+    const source = readPack(target);
     assert.equal(source.includes('\r'), false);
   });
 
@@ -337,18 +536,17 @@ describe('applyPatches', () => {
     assert.equal(report.drifted[0].id, 'attribution-user-agent');
     assert.equal(readFileSync(join(target, 'adapter', 'kernel.js'), 'utf8'), before);
     // The other patch still lands: drift is per-patch, not all-or-nothing.
-    assert.equal(report.applied.includes('content-fingerprints'), true);
+    assert.equal(report.applied.includes('signed-transport-seam'), true);
   });
 
   it('does not write in dry-run mode', () => {
     const target = makeTarget();
-    const before = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
+    const before = readPack(target);
     const report = applyPatches(target, { dryRun: true });
 
-    assert.equal(report.applied.length, PATCHES.length);
+    assert.equal(report.applied.length, PATCHES.length - 1);
     assert.equal(report.changed, false);
-    assert.equal(readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8'), before);
-    for (const state of inspect(target)) assert.equal(state.state, 'pending');
+    assert.equal(readPack(target), before);
   });
 
   it('leaves no backups behind on a clean apply', () => {
@@ -361,16 +559,23 @@ describe('applyPatches', () => {
 describe('restorePatches', () => {
   it('restores the stock text from the newest backup', () => {
     const target = makeTarget();
-    const stockPack = readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8');
+    const stockPack = readPack(target);
 
     applyPatches(target, { stamp: 'restore1' });
     assert.equal(formatStatus(target).includes('0/'), false);
 
     const result = restorePatches(target);
     assert.deepEqual(result.errors, []);
-    assert.equal(result.restored.length, 2);
-    assert.equal(readFileSync(join(target, 'vendor', 'channel-pack', 'pack.js'), 'utf8'), stockPack);
-    for (const state of inspect(target)) assert.equal(state.state, 'pending', state.id);
+    // Only files that were actually written have a backup: the pack (and, when
+    // the cleanup had something to do, still just the pack) plus the kernel.
+    assert.ok(result.restored.length >= 1);
+    assert.equal(readPack(target), stockPack);
+    for (const state of inspect(target)) {
+      // The cleanup patch reads as "already clean" on stock text, because there
+      // is nothing left to remove — that is its patched state, not pending.
+      const expected = state.id === 'legacy-direct-rewrite' ? 'patched' : 'pending';
+      assert.equal(state.state, expected, state.id);
+    }
   });
 
   it('is a no-op when no backup exists', () => {
@@ -411,18 +616,15 @@ describe('formatStatus', () => {
     const target = makeTarget();
     const text = formatStatus(target);
     for (const patch of PATCHES) assert.equal(text.includes(patch.id), true, patch.id);
-    assert.match(text, /0\/3 patches in place\./);
+    // A clean stock target already satisfies the cleanup patch.
+    assert.match(text, /1\/3 patches in place\./);
     assert.match(text, new RegExp(`revision ${PATCH_REVISION}`));
   });
 
-  it('marks an earlier equivalent form as such', () => {
-    const pack = packStock().replace(
-      '    return messages;',
-      '    messages[0] = { ...messages[0], content: rewriteTencentContentFingerprints(messages[i].content, this.product.id) };\n    return messages;',
-    );
-    const target = makeTarget({ pack });
-    const state = inspect(target).find((entry) => entry.id === 'direct-system-rewrite');
+  it('marks a cleanup that already happened as clean', () => {
+    const target = makeTarget();
+    const state = inspect(target).find((entry) => entry.id === 'legacy-direct-rewrite');
     assert.equal(state.state, 'patched');
-    assert.equal(state.note, 'earlier equivalent form');
+    assert.equal(state.note, 'already clean');
   });
 });

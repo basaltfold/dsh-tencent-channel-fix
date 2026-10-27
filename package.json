@@ -1,7 +1,7 @@
 {
   "name": "dsh-tencent-channel-fix",
-  "version": "1.0.1",
-  "description": "Repairs the buddy / workbuddy channel 400 (code 11128, \"Illegal API invocation from an unapproved channel\") inside dsh-our-free-model, and re-applies the fix after every upgrade · 修复 DSH 调用 buddy / workbuddy 渠道恒 400 code=11128 的问题，并在插件升级后自动重打",
+  "version": "1.1.0",
+  "description": "Repairs dsh-our-free-model at boot: the CodeArts (Huawei Cloud) signed-transport lifetime that broke after a plugin restart, a dangling injection left by an earlier revision, and the buddy/workbuddy 400 (code 11128) attribution User-Agent · 修复 OFM 的 CodeArts 签名传输生命周期、清掉旧版本残留的注入，并继续修 buddy/workbuddy 的 400 code=11128",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -28,6 +28,8 @@
     "tencent",
     "11128",
     "dsh-our-free-model",
+    "codearts",
+    "huaweicloud",
     "channel-fix"
   ],
   "repository": {
@@ -48,7 +50,8 @@
     "compatibility": {
       "dshReleases": {
         "0.2.0-rc.2": "compatible",
-        "0.2.1-rc.2": "compatible"
+        "0.2.1-rc.2": "compatible",
+        "0.2.1-rc.3": "compatible"
       }
     },
     "install": {

@@ -1,10 +1,32 @@
 # dsh-tencent-channel-fix
 
-Fixes the `400` / `code 11128` returned by the **buddy** and **workbuddy** channels in DeepSeek Harness, and keeps it fixed across upgrades.
+Repairs `dsh-our-free-model` at boot so its channels stay usable, and keeps the repair in place across upgrades of that plugin and of DeepSeek Harness.
+
+**Revision 2 covers the break that appeared after the DSH upgrade: CodeArts (Huawei Cloud) turns failing with `CodeArts 签名传输已停止` (`code: UNKNOWN`).** That one is a transport-lifetime bug, not a channel-gate rejection — see [§ The CodeArts transport bug](#the-codearts-transport-bug).
+
+It still fixes the `400` / `code 11128` returned by the **buddy** and **workbuddy** channels, and removes a dangling injection an earlier revision left behind.
 
 > `请求被拦截，请重新发送` · `Illegal API invocation from an unapproved channel` · `INVALID_REQUEST`
 
-Every new conversation dies on the first message, with nothing useful in the error. The message names neither the header nor the sentence that the gate actually rejected.
+---
+
+## The CodeArts transport bug
+
+`apply()` builds `signedNetwork = createDirectFetch(...)`, registers the CodeArts adapter with `fetchImpl: signedNetwork.fetch`, then closes that transport in its own dispose effect.
+
+The adapter stays registered in the kernel's `llm` service, because `registerAdapterIdempotent()` deliberately keeps the existing route on a duplicate registration (`插件 fiber 重启竞态，保留现有路由并跳过本次注册`).
+
+So once the plugin fiber is disposed and re-created — an OFM hot reload, an in-app upgrade, or a DSH upgrade that re-applies the profile — every CodeArts request still runs through the **previous** adapter, whose fetch points at the **closed** transport. The first call throws and the turn ends.
+
+The repair replaces the captured instance with a closure over a process-wide lane, and rewires all three consumers (auth service, adapter, RPC fetcher). The lane is symbol-keyed on `globalThis`, so it also survives the module purge OFM performs during a hot reload: an adapter retained from an earlier generation follows the successor transport instead of calling into a dead one.
+
+---
+
+## The buddy / workbuddy channel gate
+
+Tencent's channel gate rejects **two** independent things inside the request. Both must have been fixed; fixing one still returned `400`.
+
+> OFM 2.5.9+ retired these channels outright (`isRetiredProvider()` returns true for both), and the CodeArts-carrying 2.5.8 build no longer contains the `CONTENT_FINGERPRINTS` table the second fix edited. That fix is therefore retired in revision 2; the attribution UA sanitizer is kept because it stays correct wherever the channels still exist.
 
 ---
 
@@ -22,7 +44,7 @@ deepseek-harness/0.2.1-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)
 
 The `deepseek-harness` token is on the gate's blocklist. The check is **case-insensitive** — `DeepSeek-Harness/0.2.1` is rejected too. Every other UA tested was accepted, including `curl`, `node`, `axios`, `undici`, `codex_cli_rs`, `claude-cli`, `opencode`, and the empty UA.
 
-### 2. The harness identity sentence in the system prompt
+### 2. The harness identity sentence in the system prompt *(historical — fix retired in revision 2)*
 
 DSH's base system prompt opens with:
 
@@ -32,9 +54,9 @@ You are an AI agent powered by DeepSeek Harness.
 
 The gate treats `powered by DeepSeek Harness` as a **content fingerprint** and rejects the whole request when it appears in the system message.
 
-This one is subtle: `dsh-our-free-model` already has a fingerprint-rewriting mechanism (`rewriteTencentContentFingerprints`), but it only runs on the **gateway** path (`convertMessage` / `toMessages`). The **direct adapter** path — the one `buddy` actually uses — assembled its system message with a bare `messages.unshift(...)` and never called the rewriter. So the sentence went out verbatim.
+This one is subtle: `dsh-our-free-model` already has a fingerprint-rewriting mechanism (`rewriteTencentContentFingerprints`), but it only runs on the **gateway** path (`convertMessage` / `toMessages`). The **direct adapter** path — the one `buddy` actually used — assembled its system message with a bare `messages.unshift(...)` and never called the rewriter. So the sentence went out verbatim.
 
-Measured on the real endpoint:
+Measured on the real endpoint (OFM 2.5.7 era, while the Tencent channels still existed):
 
 | Request | Result |
 | --- | --- |
@@ -42,7 +64,9 @@ Measured on the real endpoint:
 | stock system prompt + fixed UA | `400` `code 11128` |
 | rewritten system prompt + fixed UA | `200 OK` |
 
-The same gate also rejects `Main branch (you will usually use this for PRs)`, `You are Claude Code, Anthropic's official CLI for Claude.`, and `x-anthropic-billing-header` — which is why CLI-proxy projects hit the identical error. This plugin fixes the two that DSH itself sends.
+The same gate also rejects `Main branch (you will usually use this for PRs)`, `You are Claude Code, Anthropic's official CLI for Claude.`, and `x-anthropic-billing-header` — which is why CLI-proxy projects hit the identical error.
+
+Revision 1 patched this by injecting a rewriter call into the direct path. On the pinned 2.5.8 bundle that call references a function the bundle no longer contains, so it turned a `400` into a `ReferenceError`. Revision 2 **removes** that injection (`legacy-direct-rewrite`) and retires the fingerprint-table edit, whose anchor no longer exists upstream.
 
 ---
 
@@ -76,7 +100,7 @@ dsh plugin add github:basaltfold/dsh-tencent-channel-fix
 Then restart DSH once. The boot log shows one of:
 
 ```
-[dsh-tencent-channel-fix] repair applied — applied attribution-user-agent, content-fingerprints, direct-system-rewrite. Active from the next model request.
+[dsh-tencent-channel-fix] repair applied — applied signed-transport-seam. Active from the next model request.
 [dsh-tencent-channel-fix] repair incomplete (upstream dsh-our-free-model changed) — drifted ...
 ```
 
@@ -94,13 +118,13 @@ Then restart DSH once. The boot log shows one of:
 | `why` | The root-cause explanation, in-conversation |
 
 ```
-dsh-tencent-channel-fix · patch revision 1
+dsh-tencent-channel-fix · patch revision 2
 target: C:\Users\you\.dsh\profiles\desktop\node_modules\dsh-our-free-model
-dsh-our-free-model: 2.5.7
+dsh-our-free-model: 2.5.8
 
+OK      signed-transport-seam — CodeArts signed transport lifetime (turns fail after a fiber restart)
+OK      legacy-direct-rewrite — Remove revision 1's dangling system-rewrite injection (ReferenceError)  (already clean)
 OK      attribution-user-agent — Attribution User-Agent (400 / code 11128)
-OK      content-fingerprints — Rejected system-prompt fingerprints (400 / code 11128)
-OK      direct-system-rewrite — Direct adapter path system rewrite (400 / code 11128)
 
 3/3 patches in place.
 ```

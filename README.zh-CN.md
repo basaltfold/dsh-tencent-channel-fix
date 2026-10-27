@@ -1,16 +1,32 @@
 # dsh-tencent-channel-fix
 
-修复 DeepSeek Harness 调用 **buddy** / **workbuddy** 渠道时恒返回 `400` / `code 11128` 的问题，并在插件升级后自动重打。
+在启动时修复 `dsh-our-free-model`，让它的渠道保持可用，并在该插件与 DeepSeek Harness 升级后自动重打。
+
+**revision 2 针对的是 DSH 升级后新出现的问题：CodeArts（华为云）渠道报 `CodeArts 签名传输已停止`（`code: UNKNOWN`）。** 这是传输对象的生命周期 bug，不是渠道网关的拒绝——见 [§ CodeArts 传输 bug](#codearts-传输-bug)。
+
+它同时继续修 **buddy** / **workbuddy** 渠道的 `400` / `code 11128`，并清掉上一版留下的一个悬空注入。
 
 > `请求被拦截，请重新发送` · `Illegal API invocation from an unapproved channel` · `INVALID_REQUEST`
 
-症状：新建对话，第一条消息就失败，报错里看不出任何有用的信息——它既不说是哪个请求头，也不说是哪句话。
+---
+
+## CodeArts 传输 bug
+
+`apply()` 先 `signedNetwork = createDirectFetch(...)`，把 CodeArts 适配器用 `fetchImpl: signedNetwork.fetch` 注册上去，然后在自己的 dispose 里关闭这个传输对象。
+
+而适配器仍留在内核的 `llm` 服务里——`registerAdapterIdempotent()` 遇到重复注册时会**故意保留已存在的路由**（`插件 fiber 重启竞态，保留现有路由并跳过本次注册`）。
+
+于是只要插件 fiber 被销毁并重建一次（OFM 热重载、应用内升级，或 DSH 升级后重新应用 profile），CodeArts 请求仍然走**上一代**适配器，而它的 fetch 指向**已关闭**的传输对象。第一次调用就抛异常，这一轮直接失败。
+
+修复方式是把「捕获的实例」换成「对一条进程级通道的闭包」，并改写全部三个使用方（鉴权服务、适配器、RPC fetcher）。通道用 symbol 挂在 `globalThis` 上，所以 OFM 热重载清理模块缓存时它也依然存在：上一代留下的适配器会跟随新一代传输，而不是调用一个已经死掉的。
 
 ---
 
-## 真正的原因
+## buddy / workbuddy 的渠道网关
 
 渠道网关同时拒绝了请求里的**两个**独立内容，只修一个仍然是 `400`。
+
+> OFM 2.5.9+ 已彻底下架这两个渠道（`isRetiredProvider()` 对两者都返回 true），而仍带 CodeArts 的 2.5.8 构建里也已经没有第二个修复所编辑的 `CONTENT_FINGERPRINTS` 表。因此该修复在 revision 2 中退役；归属 UA 的清洗保留——在渠道仍然存在的环境里它依然是正确的。
 
 ### 1. 归属 User-Agent
 
@@ -76,7 +92,7 @@ dsh plugin add github:basaltfold/dsh-tencent-channel-fix
 重启一次 DSH，启动日志会出现其中一条：
 
 ```
-[dsh-tencent-channel-fix] repair applied — applied attribution-user-agent, content-fingerprints, direct-system-rewrite. Active from the next model request.
+[dsh-tencent-channel-fix] repair applied — applied signed-transport-seam. Active from the next model request.
 [dsh-tencent-channel-fix] repair incomplete (upstream dsh-our-free-model changed) — drifted ...
 ```
 
@@ -94,13 +110,13 @@ dsh plugin add github:basaltfold/dsh-tencent-channel-fix
 | `why` | 在对话里给出根因说明 |
 
 ```
-dsh-tencent-channel-fix · patch revision 1
+dsh-tencent-channel-fix · patch revision 2
 target: C:\Users\you\.dsh\profiles\desktop\node_modules\dsh-our-free-model
-dsh-our-free-model: 2.5.7
+dsh-our-free-model: 2.5.8
 
+OK      signed-transport-seam — CodeArts signed transport lifetime (turns fail after a fiber restart)
+OK      legacy-direct-rewrite — Remove revision 1's dangling system-rewrite injection (ReferenceError)  (already clean)
 OK      attribution-user-agent — Attribution User-Agent (400 / code 11128)
-OK      content-fingerprints — Rejected system-prompt fingerprints (400 / code 11128)
-OK      direct-system-rewrite — Direct adapter path system rewrite (400 / code 11128)
 
 3/3 patches in place.
 ```
@@ -156,7 +172,7 @@ node -e "import('dsh-tencent-channel-fix/patcher').then(m => console.log(m.forma
 
 ## 兼容性
 
-DSH `>= 0.2.0-rc.1`。已在 `0.2.0-rc.2`、`0.2.1-rc.2` 上验证，搭配 `dsh-our-free-model` `2.5.6`（原版，0/3）与 `2.5.7`（3/3）。
+DSH `>= 0.2.0-rc.1`。已在 `0.2.0-rc.2`、`0.2.1-rc.2`、`0.2.1-rc.3` 上验证，搭配 `dsh-our-free-model` `2.5.8`（revision 2 下 3/3）。
 
 若将来 `dsh-our-free-model` 挪了锚点，`/tencent-fix status` 会把它标成 `drifted` 并给出原因，且跳过而不硬改。到新文件里重新提取锚点，更新 `lib/patcher.js` 的 `PATCHES` 即可。
 
