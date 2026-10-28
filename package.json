@@ -1,7 +1,7 @@
 {
   "name": "dsh-tencent-channel-fix",
-  "version": "1.2.0",
-  "description": "Repairs dsh-our-free-model at boot: the CodeArts (Huawei Cloud) signed-transport lifetime that broke after a plugin restart, the CodeArts queue-retry budget that turned a full 3-session account into 30 minutes of silence, a dangling injection left by an earlier revision, and the buddy/workbuddy 400 (code 11128) attribution User-Agent · 修复 OFM 的 CodeArts 签名传输生命周期与排队重试预算、清掉旧版本残留的注入，并继续修 buddy/workbuddy 的 400 code=11128",
+  "version": "1.3.0",
+  "description": "Repairs dsh-our-free-model at boot: the CodeArts (Huawei Cloud) signed-transport lifetime, the benefit-header slot leak that made every new account report a full 3-session ceiling, the queue-retry budget that turned that ceiling into 30 minutes of silence, a dangling injection left by an earlier revision, and the buddy/workbuddy 400 (code 11128) attribution User-Agent · 修复 OFM 的 CodeArts 签名传输生命周期与 benefit 头槽位泄漏、排队重试预算，清掉旧版本残留的注入，并继续修 buddy/workbuddy 的 400 code=11128",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -34,7 +34,10 @@
     "ttft",
     "latency",
     "queue",
-    "concurrency"
+    "concurrency",
+    "benefit",
+    "maas_type",
+    "session-slot"
   ],
   "repository": {
     "type": "git",

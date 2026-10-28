@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.3.0 — 2026-10-28
+
+### Fixed
+
+- **换新账号后仍然报「并发会话数已达上限」——这不是账号的问题，是适配器自己的 bug。**
+
+  `CodeArtsAdapter` 用一份硬编码清单
+  （`CODEARTS_BENEFIT_FALLBACK = ["glm-5.3-flash", "deepseek-v4.1-flash"]`）
+  判断某模型是不是「benefit 模型」，是的话每个请求都签上 `maas_type: benefit`。
+
+  当账号没有这项权益时网关返回 `InferHub.4004.200 benefit not found`。适配器捕获它、
+  设 `benefitHeaderDropped = true`、去掉头重试 —— 这一步是**成功**的。
+
+  问题在于 `benefitHeaderDropped` 是个**每次调用都会重置的局部变量**，函数返回就忘了。
+  于是**每一轮对话都要重新付一次这个注定失败的尝试**。而这个网关对失败请求同样收槽位费：
+
+  1. 被拒的请求照样开一个会话槽（实测：3 次连续请求就填满 3 个上限，
+     释放一个槽约需 150 秒）；
+  2. 于是第 1 轮靠重试成功，第 2 轮发现已经满了，第 3 轮起每次都是
+     `TM.00001041 并发会话数已达上限(3个)`。
+
+  实测复现（全新 drain 170 秒后，同一 adapter 身份连续三轮）：
+
+  | 尝试 | 结果 |
+  |---|---|
+  | turn1 #1 benefit | benefit-missing（烧掉一个槽） |
+  | turn1 #2 no-benefit | **OK** |
+  | turn2 #1 benefit | benefit-missing（又烧一个） |
+  | turn2 #2 no-benefit | SLOT_FULL |
+  | turn3 #1 benefit | SLOT_FULL |
+
+  对照：同一账号，**完全不发 benefit 头**，6 次请求间隔 25 秒 ——
+  `OK=6, SLOT_FULL=0`，首字 1.1–2.1 秒。
+
+  这就是为什么换了全新账号、明明没有任何并发，仍然立刻报「槽位已满」——
+  槽位是被这个每轮重复的失败尝试自己吃掉的。
+
+  修复方式：把这个拒绝记在 **adapter 生命周期**上而不是单次调用上。
+  学到一次之后，后续每轮直接跳过那个注定失败的请求。
+
+### Changed
+
+- Patch revision 4。新增两个 `vendor/channel-pack/pack.js` 补丁：
+  `codearts-benefit-remembered`、`codearts-benefit-skip`。
+
+### Verified
+
+- 35 项测试通过（新增 2 项：断言拒绝被记住在 adapter 上、且下次调用会预先跳过）。
+- 真实安装包上 7 个补丁全部 `patched`，`node --check` 通过。
+- 行为验证：打补丁后连续 4 轮，第 1 轮学会，第 2 轮直接跳过 benefit 头（不再多烧槽）。
+
+### Known limitation
+
+- **每轮对话仍固定消耗一个会话槽，服务端上限 3、释放约需 150 秒。**
+  这是华为云侧的硬限制，客户端绕不过。本次修复把它从「每轮烧 2 个」
+  降到「每轮烧 1 个」—— 可用轮次从 1 轮变成 3 轮，之后仍需等槽位释放。
+  想要无上限连续对话，只能换通道。
+
 ## 1.2.0 — 2026-10-28
 
 ### Fixed

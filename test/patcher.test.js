@@ -67,6 +67,23 @@ var QUEUE_MAX_ATTEMPTS2 = 180;
 function finishQueue() {
   throw new LlmError2("codearts: queue wait timed out after 30 minutes", "QUEUE");
 }
+// Revision 4 anchors: the per-call benefit flag and the place that sets it.
+function buildRequest(options) {
+  let benefitHeaderDropped = false;
+  const isBenefitModel = isCodeArtsBenefitModel(options.model);
+  for (;;) {
+    const extra = isBenefitModel && !benefitHeaderDropped ? { maas_type: "benefit" } : void 0;
+    try {
+      return sign(extra);
+    } catch (error) {
+      if (error.code === "BENEFIT_NOT_FOUND" && isBenefitModel && !benefitHeaderDropped) {
+            benefitHeaderDropped = true;
+            continue;
+      }
+      throw error;
+    }
+  }
+}
 function createDirectFetch(options = {}) {
   const agent = {};
   const lifetime = new AbortController();
@@ -507,6 +524,31 @@ describe('applyPatches', () => {
     assert.equal(source.includes('${QUEUE_MAX_ATTEMPTS2}'), true);
     // The error code is unchanged: callers and the failure classifier key on it.
     assert.equal(source.includes('"QUEUE");'), true);
+  });
+
+  it('remembers the benefit rejection on the adapter, not just the call', () => {
+    const target = makeTarget();
+    applyPatches(target, { stamp: 'benefit-remember' });
+    const source = readPack(target);
+
+    // The rejected entitlement must be remembered beyond this one call, or the
+    // doomed attempt is re-paid every turn and burns a session slot each time.
+    assert.equal(source.includes('this.benefitUnsupported = true;'), true);
+    // The stock per-call flag and its retry must survive: skipping the attempt
+    // is the optimisation, abandoning the fallback would be a regression.
+    assert.equal(source.includes('let benefitHeaderDropped = false;'), true);
+    assert.equal(source.includes('benefitHeaderDropped = true;'), true);
+    assert.equal(source.includes('continue;'), true);
+  });
+
+  it('skips the doomed benefit attempt once the account has rejected it', () => {
+    const target = makeTarget();
+    applyPatches(target, { stamp: 'benefit-skip' });
+    const source = readPack(target);
+
+    // On the next call the remembered flag pre-drops the header, so the request
+    // that the gateway would reject is never sent at all.
+    assert.equal(source.includes('if (this.benefitUnsupported === true) benefitHeaderDropped = true;'), true);
   });
 
   it('produces a working sanitizer', () => {
