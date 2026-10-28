@@ -2,3 +2,6 @@ node_modules/
 *.log
 *.dsh-tencent-channel-fix.bak
 .DS_Store
+.bak-r3/
+.dsh-ops-update-*.lock
+.git-commit-msg.txt

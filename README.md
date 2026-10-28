@@ -22,6 +22,41 @@ The repair replaces the captured instance with a closure over a process-wide lan
 
 ---
 
+## The CodeArts queue-retry budget
+
+Huawei caps this account at **3 concurrent sessions** and answers
+`TM.00001041 并发会话数已达上限(3个)` when they are full. OFM classifies that as
+a *queue* signal (`isQueueError`), so instead of surfacing it it increments
+`queueAttempts`, waits `QUEUE_RETRY_DELAY_MS`, and retries the whole request —
+up to `QUEUE_MAX_ATTEMPTS2` times.
+
+The stock constants are 10 s and 180: **30 minutes of total silence** before the
+turn reports anything. A slot-full answer is not a queue position; it is a hard
+account ceiling, and retrying does not move it.
+
+Measured on the operator's machine from its own token ledger
+(`~/.dsh/channel-pack/token-ledger.json`, 2634 CodeArts requests over 8 days):
+
+| channel | avg TTFT |
+|---|---|
+| **codearts** / deepseek-v4.1-flash | **114,639 ms (≈1.9 min)** |
+| qodercn / dfmodel | 2,645 ms |
+| buddy / deepseek-v4.1-flash | 2,626 ms |
+
+A single upstream attempt, re-signed with this package's own
+`signRequestHuawei`, returns in **270–900 ms** — so the missing ~110 s is the
+retry loop, not model thinking.
+
+The repair is two constants: `QUEUE_RETRY_DELAY_MS` 10000 → 1200 and
+`QUEUE_MAX_ATTEMPTS2` 180 → 4. Worst case drops from **30 minutes to 4.8 s**,
+while four retries are kept so a slot that is genuinely about to free up still
+self-heals. The message that ends the wait is rewritten to name the real ceiling
+and the two ways out, interpolating `${QUEUE_MAX_ATTEMPTS2}` so the number can
+never drift out of sync with the budget. The `QUEUE` error code is unchanged, so
+no caller or classifier needs to move.
+
+---
+
 ## The buddy / workbuddy channel gate
 
 Tencent's channel gate rejects **two** independent things inside the request. Both must have been fixed; fixing one still returned `400`.

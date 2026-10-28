@@ -60,6 +60,13 @@ export async function resolveAttributionUserAgent(logger) {
  */
 function packStock() {
   return `var directLane = { fetch: null };
+// Revision 3 anchors: the stock CodeArts queue-retry budget and the message that
+// ends a queue wait. Both live in the real bundle and are edited independently.
+var QUEUE_RETRY_DELAY_MS = 1e4;
+var QUEUE_MAX_ATTEMPTS2 = 180;
+function finishQueue() {
+  throw new LlmError2("codearts: queue wait timed out after 30 minutes", "QUEUE");
+}
 function createDirectFetch(options = {}) {
   const agent = {};
   const lifetime = new AbortController();
@@ -297,8 +304,11 @@ describe('inspect', () => {
     rmSync(join(target, 'vendor'), { recursive: true, force: true });
     const states = inspect(target);
     const packPatches = states.filter((state) => state.file.includes('pack.js'));
-    assert.equal(packPatches.length, 2);
+    // Counted from the registry, not hard-coded: revision 3 added two more
+    // pack.js patches, and a literal here would fail for the wrong reason.
+    assert.equal(packPatches.length, PATCHES.filter((p) => p.file.includes('pack.js')).length);
     assert.equal(packPatches.find((s) => s.id === 'signed-transport-seam').state, 'drifted');
+    assert.equal(packPatches.find((s) => s.id === 'codearts-queue-budget').state, 'drifted');
   });
 
   it('detects drift when an anchor disappears', () => {
@@ -464,6 +474,41 @@ describe('applyPatches', () => {
     assert.equal(code.includes('github.com/deepseek-ai/deepseek-harness'), false);
   });
 
+  it('bounds the CodeArts queue retry instead of waiting 30 minutes', () => {
+    const target = makeTarget();
+    applyPatches(target, { stamp: 'queue-budget' });
+    const source = readPack(target);
+
+    assert.equal(source.includes('var QUEUE_RETRY_DELAY_MS = 1200;'), true);
+    assert.equal(source.includes('var QUEUE_MAX_ATTEMPTS2 = 4;'), true);
+    // The stock pair must be gone, or the adapter would still take the 10 s path.
+    assert.equal(source.includes('var QUEUE_RETRY_DELAY_MS = 1e4;'), false);
+    assert.equal(source.includes('var QUEUE_MAX_ATTEMPTS2 = 180;'), false);
+
+    // Worst case is the product of the two, and that product is the whole point
+    // of the patch: it has to be seconds, not minutes.
+    const delay = Number(/var QUEUE_RETRY_DELAY_MS = (\d+);/.exec(source)[1]);
+    const attempts = Number(/var QUEUE_MAX_ATTEMPTS2 = (\d+);/.exec(source)[1]);
+    assert.ok(delay * attempts <= 6000, `worst case ${delay * attempts}ms`);
+    // Still more than one try, so a slot that is genuinely about to free up is
+    // not given up on immediately.
+    assert.ok(attempts >= 2, `attempts ${attempts}`);
+  });
+
+  it('replaces the 30-minute claim with the real ceiling and a way out', () => {
+    const target = makeTarget();
+    applyPatches(target, { stamp: 'queue-msg' });
+    const source = readPack(target);
+
+    assert.equal(source.includes('queue wait timed out after 30 minutes'), false);
+    // Names the cause...
+    assert.equal(source.includes('\u5E76\u53D1\u4F1A\u8BDD\u69FD\u4F4D\u5DF2\u6EE1'), true);
+    // ...and interpolates the budget, so the number cannot drift out of sync.
+    assert.equal(source.includes('${QUEUE_MAX_ATTEMPTS2}'), true);
+    // The error code is unchanged: callers and the failure classifier key on it.
+    assert.equal(source.includes('"QUEUE");'), true);
+  });
+
   it('produces a working sanitizer', () => {
     const target = makeTarget();
     applyPatches(target, { stamp: 'fn' });
@@ -616,8 +661,9 @@ describe('formatStatus', () => {
     const target = makeTarget();
     const text = formatStatus(target);
     for (const patch of PATCHES) assert.equal(text.includes(patch.id), true, patch.id);
-    // A clean stock target already satisfies the cleanup patch.
-    assert.match(text, /1\/3 patches in place\./);
+    // A clean stock target already satisfies the cleanup patch, and only that
+    // one — derived from the registry so a new patch cannot break this line.
+    assert.match(text, new RegExp(`1/${PATCHES.length} patches in place\\.`));
     assert.match(text, new RegExp(`revision ${PATCH_REVISION}`));
   });
 

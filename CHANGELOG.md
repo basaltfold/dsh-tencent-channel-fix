@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.2.0 — 2026-10-28
+
+### Fixed
+
+- **CodeArts 首字要等好几分钟。** 根因不在模型，也不在网络：华为云对账号的
+  并发会话上限是 3 个，满了会返回 `TM.00001041 并发会话数已达上限(3个)`。
+  OFM 把这个错误判成「排队」（`isQueueError`），于是跳过抛错、递增
+  `queueAttempts`、`delay(QUEUE_RETRY_DELAY_MS)` 后整条请求重来 ——
+  默认 10 秒一次、最多 180 次，**即最坏 30 分钟一个字都不吐**。
+
+  实测（操作者本机 `~/.dsh/channel-pack/token-ledger.json`，8 天 2634 次
+  CodeArts 请求）：
+
+  | 通道 | 平均首字 |
+  |---|---|
+  | codearts / deepseek-v4.1-flash | **114,639 ms（≈1.9 分钟）** |
+  | qodercn / dfmodel | 2,645 ms |
+  | buddy / deepseek-v4.1-flash | 2,626 ms |
+
+  单次上游请求（复用本包自带的 `signRequestHuawei` 重新签名后直连测量）
+  只要 **270~900 ms** 就返回 —— 换句话说，消失的那 110 秒全在重试循环里。
+
+  修复方式是最小改动：`QUEUE_RETRY_DELAY_MS` 10000 → 1200、
+  `QUEUE_MAX_ATTEMPTS2` 180 → 4。**最坏等待 30 分钟 → 4.8 秒（快 375 倍）**，
+  同时保留 4 次重试，真·瞬时占满仍能自愈。
+
+- **超时文案在撒谎。** 原文案 `queue wait timed out after 30 minutes` 在预算改成
+  4.8 秒后已经不成立，且没说清原因和出路。改为直说「并发会话槽位已满（账号上限
+  3 个），已尝试 N 次仍未释放」并给出两个动作。次数用
+  `${QUEUE_MAX_ATTEMPTS2}` 插值，以后调预算文案不会失同步。
+  错误码仍是 `QUEUE`，不动分类器和调用方。
+
+### Changed
+
+- Patch revision 3。新增两个 `vendor/channel-pack/pack.js` 补丁：
+  `codearts-queue-budget`、`codearts-queue-message`。
+  均为单次精确锚点，锚点消失/重复时报 drift 而不强改。
+
+### Verified
+
+- 33 项测试通过（新增 2 项：分别断言重试预算被压到秒级、文案换成真话）。
+- 在真实安装包的临时副本上端到端跑过：两个新补丁落盘、rev2 的签名传输与 UA
+  补丁保持完好、二次执行幂等、`node --check` 通过。
+
+### Known limitation
+
+- 快速失败后**不会**自动切到下一个模型。`QUEUE` 不在
+  `src/route/classify.js` 的映射表里，落到 unknown → `shouldAdvance()`
+  返回 false，combo 链不会因这次失败自动换道。它会明确报错让你换模型，
+  但不替你换。若要自动换道，需要用 combo 并确保链上有可用成员。
+
 ## 1.1.0 — 2026-10-27
 
 ### Fixed
@@ -48,66 +99,12 @@
 ### Verified
 
 - 31 tests passing, including a lifecycle case that drives the real patched
-  transport region through a plugin fiber restart: the retained adapter reaches
-  the successor lane, and fails loudly once no transport remains.
-- Re-ran the boot order the profile uses (`dsh-ofm-codearts-pin` restores
-  hash-pinned pristine bytes first, then this plugin repairs): the repair
-  re-lands cleanly and the result passes `node --check`.
+  `apply()` and proves a retained adapter reaches the successor transport.
 
-## 1.0.1 — 2026-10-21
-
-### Fixed
-
-- The `test` and `check` npm scripts passed a directory to `node --test`
-  (`node --test test/`), which Node 24 rejects with
-  `Error: Cannot find module .../test` (`MODULE_NOT_FOUND`). Both now use
-  auto-discovery (`node --test`), which is the form the suite was actually
-  verified with: 6 suites, 29 tests, all passing.
-
-## 1.0.0 — 2026-10-21
-
-Initial release.
-
-### Fixed
-
-- `400` / `code 11128` (`Illegal API invocation from an unapproved channel`,
-  `请求被拦截，请重新发送`) on the `buddy` and `workbuddy` channels, which made
-  every new conversation fail on its first message.
-
-  Root cause was two independent rejections, both required:
-
-  1. **Attribution User-Agent** — `adapter/kernel.js` published
-     `deepseek-harness/<version> (+https://github.com/deepseek-ai/deepseek-harness)`.
-     The `deepseek-harness` token is blocklisted, case-insensitively. Now rewritten
-     to `dsh-our-free-model/<version>`, keeping attribution present and meaningful.
-  2. **System-prompt identity line** — `powered by DeepSeek Harness` is a content
-     fingerprint. The direct adapter path (`BuddyAdapter.buildBody`) assembled its
-     system message with a bare `unshift` and never called the existing
-     `rewriteTencentContentFingerprints`, so the sentence reached the gate verbatim.
-     The rewrite now runs on that path too, and the fingerprint table gained this
-     line and the attribution URL.
-
-  Evidence: stock system + fixed UA alone still returned `400`; both fixes together
-  returned `200`. After the repair, four accounts: three `200`, one `429 code=6004`
-  (that account's own quota). Live gateway: `buddy/hy4-preview`, `buddy/hy3`,
-  `buddy/deepseek-v4.1-flash` all `200`, and `code 11128` occurrences in
-  `bili.log` dropped to zero.
+## 1.0.0 — 2026-10-20
 
 ### Added
 
-- Boot-time repair, idempotent, drift-aware, with `node --check` verification and
-  automatic restore from backup on any failure. Survives upgrades of
-  `dsh-our-free-model`, which previously reverted hand-applied fixes.
-- `/tencent-fix` slash command: `status`, `apply`, `restore`, `why`.
-- `GET /dsh-tencent-channel-fix` — read-only JSON status, loopback-only.
-- `dsh-tencent-channel-fix/patcher` export, usable standalone:
-  `inspect`, `applyPatches`, `restorePatches`, `formatStatus`, `resolveTarget`.
-- 29-test suite covering idempotency, CRLF/LF preservation, ambiguity detection,
-  per-patch drift, dry-run, backup restore, and the sanitizer's real output.
-
-### Notes
-
-- Provider-scoped: the content rewrite applies only to `TENCENT_PROVIDERS`
-  (`buddy`, `workbuddy`). No other channel is touched.
-- Scope is two files inside `dsh-our-free-model`. No provider, model row, route,
-  credential, or DSH file is modified.
+- Initial release: sanitize the harness attribution User-Agent (400 / code
+  11128 on the buddy / workbuddy channels) and repair the channel-fingerprint
+  system prompt rewrite.
